@@ -143,7 +143,8 @@ impl OrderBook {
         let mut trades = Vec::new();
 
         if let Some(ob) = &mut self.observer {
-            ob.log(&Event::New(order.clone())).expect("Failed to log");
+            ob.log(&Event::New(order.clone()).into())
+                .expect("Failed to log");
         }
 
         match order.side {
@@ -212,7 +213,7 @@ impl OrderBook {
         }
 
         if let Some(ob) = &mut self.observer {
-            ob.log(&Event::Cancel { order_id: id })
+            ob.log(&Event::Cancel { order_id: id }.into())
                 .expect("Failed to Log");
         }
 
