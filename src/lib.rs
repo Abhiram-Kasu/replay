@@ -3,11 +3,15 @@
 //! Prices are expressed as integer ticks and quantities as integer lots.  That
 //! is intentional: floating-point values are unsuitable for matching rules
 //! because equal-looking decimal values may compare differently in binary.
-
+pub mod observe;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
+    default,
     num::NonZero,
 };
+
+use crate::observe::Event;
+use crate::observe::Observer;
 
 pub type OrderId = u64;
 pub type Price = NonZero<i64>;
@@ -84,8 +88,9 @@ struct RestingOrder {
 /// `BTreeMap` makes the best-price selection deterministic: the lowest ask is
 /// the first ask key, and the highest bid is the last bid key.  It also makes
 /// the book's iteration order stable when we later serialize or replay it.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct OrderBook {
+    observer: Option<Box<dyn Observer>>,
     bids: BTreeMap<Price, PriceLevel>,
     asks: BTreeMap<Price, PriceLevel>,
     resting_orders: BTreeMap<OrderId, RestingOrder>,
@@ -94,7 +99,32 @@ pub struct OrderBook {
     seen_order_ids: BTreeSet<OrderId>,
 }
 
+impl std::fmt::Debug for OrderBook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OrderBook")
+            .field(
+                "observer",
+                &match self.observer {
+                    Some(_) => "Attached Observer",
+                    None => "No Observer",
+                }
+                .to_owned(),
+            )
+            .field("bids", &self.bids)
+            .field("asks", &self.asks)
+            .field("resting_orders", &self.resting_orders)
+            .field("seen_order_ids", &self.seen_order_ids)
+            .finish()
+    }
+}
+
 impl OrderBook {
+    pub fn new_with_observer(observer: impl Observer + 'static) -> Self {
+        Self {
+            observer: Some(Box::new(observer)),
+            ..Self::default()
+        }
+    }
     pub fn new() -> Self {
         Self::default()
     }
@@ -111,6 +141,10 @@ impl OrderBook {
 
         let mut remaining = order.quantity;
         let mut trades = Vec::new();
+
+        if let Some(ob) = &mut self.observer {
+            ob.log(&Event::New(order.clone())).expect("Failed to log");
+        }
 
         match order.side {
             Side::Buy => {
@@ -175,6 +209,11 @@ impl OrderBook {
         level.queue.remove(queue_position);
         if level.queue.is_empty() {
             levels.remove(&order.price);
+        }
+
+        if let Some(ob) = &mut self.observer {
+            ob.log(&Event::Cancel { order_id: id })
+                .expect("Failed to Log");
         }
 
         Ok(CancelledOrder {

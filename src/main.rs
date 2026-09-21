@@ -1,9 +1,10 @@
 use std::num::NonZero;
 
-use replay::{LimitOrder, OrderBook, Side};
+use replay::{LimitOrder, OrderBook, Side, observe::ConsoleLogger};
 
 fn main() {
-    let mut book = OrderBook::new();
+    let observer = ConsoleLogger::new();
+    let mut book = OrderBook::new_with_observer(observer);
 
     // Two resting asks at the same price. ID 1 arrived first, so it fills first.
     book.submit(LimitOrder {
