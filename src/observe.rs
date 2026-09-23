@@ -1,7 +1,11 @@
+use std::env::consts::DLL_PREFIX;
 use std::error::Error;
 use std::fmt::Display;
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::marker::PhantomData;
 use std::sync::mpsc::{Sender, channel};
-use std::thread::{self, JoinHandle};
+use std::thread::{self, JoinHandle, spawn};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{LimitOrder, Price};
@@ -91,5 +95,69 @@ impl Observer for MultiObserver {
             }
         }
         Ok(())
+    }
+}
+
+pub trait FileObserver: Observer {}
+
+pub struct BufferedFileObserver {
+    worker: Worker<TimedEvent>,
+}
+
+impl BufferedFileObserver {
+    pub const DEFAULT_BUFFER_SIZE: usize = 8 * 1024;
+    pub fn with_capacity(file: File, buffer_size: usize) -> Self {
+        let mut buf_writer = BufWriter::with_capacity(buffer_size, file);
+        let worker = Worker::new(move |event: TimedEvent| {
+            if let Err(err) = write!(buf_writer, "{} {:?}", event.time, event.event) {
+                eprintln!("Failed to write {event}: {err}");
+            }
+        });
+
+        Self { worker }
+    }
+
+    pub fn new(file: File) -> Self {
+        Self::with_capacity(file, Self::DEFAULT_BUFFER_SIZE)
+    }
+}
+
+impl Observer for BufferedFileObserver {
+    fn log(&mut self, event: &TimedEvent) -> Result<(), Box<dyn Error>> {
+        self.worker
+            .sender()
+            .send(event.clone())
+            .map_err(|err| Box::new(err) as Box<dyn Error>)
+    }
+}
+
+impl FileObserver for BufferedFileObserver {}
+
+struct Worker<TParam> {
+    sender: Sender<TParam>,
+    thread: JoinHandle<()>,
+}
+
+impl<TParam: Send + 'static> Worker<TParam> {
+    pub fn new<TFunc>(mut func: TFunc) -> Self
+    where
+        TFunc: FnMut(TParam) -> () + Send + 'static,
+    {
+        let (sender, receiver) = channel::<TParam>();
+        let thread = spawn(move || {
+            for item in receiver.iter() {
+                func(item);
+            }
+        });
+        Self { sender, thread }
+    }
+
+    pub fn sender(&self) -> &Sender<TParam> {
+        &self.sender
+    }
+
+    pub fn join(self) -> std::thread::Result<()> {
+        drop(self.sender);
+        self.thread.join()
     }
 }
