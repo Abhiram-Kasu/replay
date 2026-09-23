@@ -1,10 +1,9 @@
-use std::env::consts::DLL_PREFIX;
 use std::error::Error;
 use std::fmt::Display;
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::marker::PhantomData;
-use std::sync::mpsc::{Sender, channel};
+use std::sync::mpsc::Sender;
+use std::sync::mpsc::channel;
 use std::thread::{self, JoinHandle, spawn};
 use std::time::{SystemTime, UNIX_EPOCH};
 

@@ -6,7 +6,6 @@
 pub mod observe;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
-    default,
     num::NonZero,
 };
 
