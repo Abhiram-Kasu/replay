@@ -49,8 +49,7 @@ pub trait Observer {
 }
 
 pub struct ConsoleLogger {
-    logging_thread: JoinHandle<()>,
-    sending_channel: Sender<TimedEvent>,
+    worker: Worker<TimedEvent>,
 }
 
 impl ConsoleLogger {
@@ -61,21 +60,16 @@ impl ConsoleLogger {
 
 impl Default for ConsoleLogger {
     fn default() -> Self {
-        let (sender, receiver) = channel();
         Self {
-            logging_thread: thread::spawn(move || {
-                while let Some(event) = receiver.iter().next() {
-                    println!("[ConsoleLogger] {event}");
-                }
-            }),
-            sending_channel: sender,
+            worker: Worker::new(move |event| println!("[ConsoleLogger] {event}")),
         }
     }
 }
 
 impl Observer for ConsoleLogger {
     fn log(&mut self, event: &TimedEvent) -> Result<(), Box<dyn Error>> {
-        self.sending_channel
+        self.worker
+            .sender()
             .send(event.clone())
             .map_err(|err| Box::new(err) as Box<dyn Error>)
     }
