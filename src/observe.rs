@@ -77,3 +77,19 @@ impl Observer for ConsoleLogger {
             .map_err(|err| Box::new(err) as Box<dyn Error>)
     }
 }
+
+// TODO maybe upgrade to multicast eventually for more complicated observers?
+pub struct MultiObserver {
+    observers: Vec<Box<dyn Observer>>,
+}
+
+impl Observer for MultiObserver {
+    fn log(&mut self, event: &TimedEvent) -> Result<(), Box<dyn Error>> {
+        for observer in &mut self.observers {
+            if let Some(e) = observer.log(event).err() {
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+}
