@@ -2,11 +2,9 @@ use std::error::Error;
 use std::fmt::Display;
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::sync::mpsc::Sender;
-use std::sync::mpsc::channel;
-use std::thread::{self, JoinHandle, spawn};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::worker::Worker;
 use crate::{LimitOrder, Price};
 #[derive(Debug, Copy, Clone)]
 pub enum Event {
@@ -125,32 +123,3 @@ impl Observer for BufferedFileObserver {
 }
 
 impl FileObserver for BufferedFileObserver {}
-
-struct Worker<TParam> {
-    sender: Sender<TParam>,
-    thread: JoinHandle<()>,
-}
-
-impl<TParam: Send + 'static> Worker<TParam> {
-    pub fn new<TFunc>(mut func: TFunc) -> Self
-    where
-        TFunc: FnMut(TParam) -> () + Send + 'static,
-    {
-        let (sender, receiver) = channel::<TParam>();
-        let thread = spawn(move || {
-            for item in receiver.iter() {
-                func(item);
-            }
-        });
-        Self { sender, thread }
-    }
-
-    pub fn sender(&self) -> &Sender<TParam> {
-        &self.sender
-    }
-
-    pub fn join(self) -> std::thread::Result<()> {
-        drop(self.sender);
-        self.thread.join()
-    }
-}

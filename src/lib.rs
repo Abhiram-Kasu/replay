@@ -4,6 +4,7 @@
 //! is intentional: floating-point values are unsuitable for matching rules
 //! because equal-looking decimal values may compare differently in binary.
 pub mod observe;
+mod worker;
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     num::NonZero,
