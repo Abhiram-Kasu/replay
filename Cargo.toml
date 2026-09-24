@@ -5,3 +5,10 @@ edition = "2024"
 
 [dependencies]
 memmap2 = "0.9.11"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "observers"
+harness = false
