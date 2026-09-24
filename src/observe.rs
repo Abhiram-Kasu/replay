@@ -1,8 +1,11 @@
+use std::cell::RefCell;
 use std::error::Error;
 use std::fmt::Display;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::os::fd::{AsFd, AsRawFd, IntoRawFd, RawFd};
+use std::sync::atomic::AtomicUsize;
+use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use memmap2::{Mmap, MmapMut, MmapOptions};
@@ -133,25 +136,42 @@ impl Observer for BufferedFileObserver {
 
 impl FileObserver for BufferedFileObserver {}
 //Will be append only, so we can memory map chunk by chunk
-struct MemoryMappedFileObserver {
+pub struct MemoryMappedFileObserver {
     worker: Worker<TimedEvent>,
+    mmap: Arc<RwLock<MmapMut>>,
+    file: File,
+    // needed to truncate the file correctly at the end
+    total_file_size: Arc<AtomicUsize>,
 }
 
 struct MemoryMappedFileObserverState {
     file_fd: RawFd,
-    mmap_handle: MmapMut,
+    mmap_handle: Arc<RwLock<MmapMut>>,
     offset: usize,
     default_size: usize,
 }
 
+impl Observer for MemoryMappedFileObserver {
+    fn log(&mut self, event: &TimedEvent) -> Result<(), Box<dyn Error>> {
+        self.worker.sender().send(event.clone())?;
+        Ok(())
+    }
+}
+
+impl FileObserver for MemoryMappedFileObserver {}
 impl MemoryMappedFileObserverState {
     fn remap(&mut self) -> Result<(), Box<dyn Error>> {
-        self.mmap_handle = unsafe {
+        self.mmap_handle
+            .read()
+            .expect("Failed to do Read Lock")
+            .flush()
+            .expect("Failed to flush changes in remap");
+        self.mmap_handle = Arc::new(RwLock::new(unsafe {
             MmapOptions::new()
                 .offset(self.offset as u64)
                 .len(self.default_size)
                 .map_mut(self.file_fd)?
-        };
+        }));
 
         self.offset = 0;
 
@@ -159,37 +179,72 @@ impl MemoryMappedFileObserverState {
     }
 }
 
+impl Drop for MemoryMappedFileObserver {
+    fn drop(&mut self) {
+        // truncate the file
+        self.file
+            .set_len(
+                self.total_file_size
+                    .load(std::sync::atomic::Ordering::Acquire) as u64,
+            )
+            .expect("Failed to truncate file");
+        self.mmap
+            .read()
+            .expect("Failed to lock mmap for Read")
+            .flush()
+            .expect("Failed to flush mmap changes on drop");
+    }
+}
+
 impl MemoryMappedFileObserver {
     // we will just overwrite anything in the file, maybe in the future have a pointer into the file from where we can start writing
     pub fn new(file: File, initial_size: usize) -> Result<Self, Box<dyn Error>> {
-        let mmap = unsafe {
+        let mmap = Arc::new(RwLock::new(unsafe {
             MmapOptions::default()
                 .len(initial_size)
                 .map_mut(file.as_raw_fd())
-        }?;
+        }?));
 
         let mut state = MemoryMappedFileObserverState {
-            file_fd: file.into_raw_fd(),
-            mmap_handle: mmap,
+            file_fd: file.as_raw_fd(),
+            mmap_handle: mmap.clone(),
             offset: 0,
             default_size: initial_size,
         };
 
+        let mut total_file_size = Arc::new(AtomicUsize::new(0));
+        let worker_copy = total_file_size.clone();
+
         let worker = Worker::new(move |event: TimedEvent| {
             let st = &mut state;
-            let output = format!("[MMapObserver] {event}");
+            let output = format!("[MMapObserver] {event}\n");
             let len = output.len();
+            {
+                let mmap_read = st
+                    .mmap_handle
+                    .read()
+                    .expect("Failed to get read lock on mmap");
 
-            if len + st.offset >= st.mmap_handle.len() {
-                if let Some(err) = st.remap().err() {
-                    eprintln!("Failed to remap: {err}");
+                if len + st.offset >= mmap_read.len() {
+                    drop(mmap_read);
+                    if let Some(err) = st.remap().err() {
+                        eprintln!("Failed to remap: {err}");
+                    }
                 }
             }
-
             let bytes = output.bytes().collect::<Vec<_>>();
 
-            st.mmap_handle[st.offset..st.offset + bytes.len()].copy_from_slice(bytes.as_slice());
+            let mut mmap_write = st.mmap_handle.write().expect("Failed to get write handle");
+            mmap_write[st.offset..st.offset + bytes.len()].copy_from_slice(bytes.as_slice());
+            st.offset += bytes.len();
+            // Just update eventually
+            worker_copy.fetch_add(bytes.len(), std::sync::atomic::Ordering::Relaxed);
         });
-        Ok(Self { worker })
+        Ok(Self {
+            worker,
+            file,
+            mmap,
+            total_file_size,
+        })
     }
 }
