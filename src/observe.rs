@@ -1,20 +1,20 @@
-use std::cell::RefCell;
 use std::error::Error;
 use std::fmt::Display;
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::os::fd::{AsFd, AsRawFd, IntoRawFd, RawFd};
+use std::os::fd::{AsRawFd, RawFd};
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use memmap2::{Mmap, MmapMut, MmapOptions};
+use memmap2::{MmapMut, MmapOptions};
 
 use crate::worker::Worker;
-use crate::{LimitOrder, Price};
+use crate::{LimitOrder, Price, Trade};
 #[derive(Debug, Copy, Clone)]
 pub enum Event {
     New(LimitOrder),
+    Trade(Trade),
     Cancel {
         order_id: u64,
     },
@@ -24,10 +24,10 @@ pub enum Event {
         new_quantity: Option<u64>,
     },
 }
-impl Into<TimedEvent> for Event {
-    fn into(self) -> TimedEvent {
+impl From<Event> for TimedEvent {
+    fn from(event: Event) -> Self {
         TimedEvent {
-            event: self,
+            event,
             time: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .expect("Failed to get current time")
@@ -39,6 +39,12 @@ impl Into<TimedEvent> for Event {
 pub struct TimedEvent {
     event: Event,
     time: u128,
+}
+
+impl TimedEvent {
+    pub fn event(&self) -> Event {
+        self.event
+    }
 }
 
 impl Display for TimedEvent {
@@ -74,7 +80,7 @@ impl Observer for ConsoleLogger {
     fn log(&mut self, event: &TimedEvent) -> Result<(), Box<dyn Error>> {
         self.worker
             .sender()
-            .send(event.clone())
+            .send(*event)
             .map_err(|err| Box::new(err) as Box<dyn Error>)
     }
 }
@@ -90,7 +96,7 @@ impl<const NUM: usize> MultiObserver<NUM> {
     }
 }
 
-impl<'a, const NUM: usize> Observer for MultiObserver<NUM> {
+impl<const NUM: usize> Observer for MultiObserver<NUM> {
     fn log(&mut self, event: &TimedEvent) -> Result<(), Box<dyn Error>> {
         for observer in &mut self.observers {
             if let Some(e) = observer.log(event).err() {
@@ -112,7 +118,7 @@ impl BufferedFileObserver {
     pub fn with_capacity(file: File, buffer_size: usize) -> Self {
         let mut buf_writer = BufWriter::with_capacity(buffer_size, file);
         let worker = Worker::new(move |event: TimedEvent| {
-            if let Err(err) = write!(buf_writer, "[BufferedFileObserver] {event}\n") {
+            if let Err(err) = writeln!(buf_writer, "[BufferedFileObserver] {event}") {
                 eprintln!("Failed to write {event}: {err}");
             }
         });
@@ -129,7 +135,7 @@ impl Observer for BufferedFileObserver {
     fn log(&mut self, event: &TimedEvent) -> Result<(), Box<dyn Error>> {
         self.worker
             .sender()
-            .send(event.clone())
+            .send(*event)
             .map_err(|err| Box::new(err) as Box<dyn Error>)
     }
 }
@@ -153,7 +159,7 @@ struct MemoryMappedFileObserverState {
 
 impl Observer for MemoryMappedFileObserver {
     fn log(&mut self, event: &TimedEvent) -> Result<(), Box<dyn Error>> {
-        self.worker.sender().send(event.clone())?;
+        self.worker.sender().send(*event)?;
         Ok(())
     }
 }
@@ -212,7 +218,7 @@ impl MemoryMappedFileObserver {
             default_size: initial_size,
         };
 
-        let mut total_file_size = Arc::new(AtomicUsize::new(0));
+        let total_file_size = Arc::new(AtomicUsize::new(0));
         let worker_copy = total_file_size.clone();
 
         let worker = Worker::new(move |event: TimedEvent| {

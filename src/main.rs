@@ -2,7 +2,6 @@ use std::{
     env,
     fs::{File, OpenOptions},
     num::NonZero,
-    path::Path,
 };
 
 use replay::{
@@ -18,13 +17,14 @@ fn main() {
         .expect("Failed to create file");
     let buffered_file_observer = BufferedFileObserver::new(buffered_file);
 
-    let mut options = OpenOptions::new()
+    let options = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
+        .truncate(true)
         .open(buffered_file_path.join("mmap_file_log.log"))
         .expect("Failed to open MMAP file");
-    options.set_len(1024);
+    options.set_len(1024).expect("Failed to size MMAP file");
 
     let mmap_observer = MemoryMappedFileObserver::new(options, 1024)
         .expect("Failed to create MemoryMappedFileObserver");

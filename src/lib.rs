@@ -143,8 +143,7 @@ impl OrderBook {
         let mut trades = Vec::new();
 
         if let Some(ob) = &mut self.observer {
-            ob.log(&Event::New(order.clone()).into())
-                .expect("Failed to log");
+            ob.log(&Event::New(order).into()).expect("Failed to log");
         }
 
         match order.side {
@@ -183,6 +182,12 @@ impl OrderBook {
                 },
                 order.id,
             );
+        }
+
+        if let Some(ob) = &mut self.observer {
+            for trade in &trades {
+                ob.log(&Event::Trade(*trade).into()).expect("Failed to log");
+            }
         }
 
         Ok(trades)
@@ -351,6 +356,18 @@ impl OrderBook {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    struct RecordingObserver {
+        events: Arc<Mutex<Vec<Event>>>,
+    }
+
+    impl Observer for RecordingObserver {
+        fn log(&mut self, event: &observe::TimedEvent) -> Result<(), Box<dyn std::error::Error>> {
+            self.events.lock().unwrap().push(event.event());
+            Ok(())
+        }
+    }
 
     fn order(id: OrderId, side: Side, price: Price, quantity: Quantity) -> LimitOrder {
         LimitOrder {
@@ -359,6 +376,26 @@ mod tests {
             price,
             quantity,
         }
+    }
+
+    #[test]
+    fn observer_receives_new_trade_and_cancel_events() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut book = OrderBook::new_with_observer(RecordingObserver {
+            events: Arc::clone(&events),
+        });
+        let price = NonZero::new(100).unwrap();
+
+        book.submit(order(1, Side::Sell, price, 2)).unwrap();
+        book.submit(order(2, Side::Buy, price, 1)).unwrap();
+        book.cancel(1).unwrap();
+
+        let events = events.lock().unwrap();
+        assert!(matches!(events[0], Event::New(order) if order.id == 1));
+        assert!(matches!(events[1], Event::New(order) if order.id == 2));
+        assert!(matches!(events[2], Event::Trade(trade)
+            if trade.maker_id == 1 && trade.taker_id == 2 && trade.quantity == 1));
+        assert!(matches!(events[3], Event::Cancel { order_id: 1 }));
     }
 
     #[test]

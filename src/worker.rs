@@ -3,13 +3,13 @@ use std::thread::{JoinHandle, spawn};
 
 pub(crate) struct Worker<TParam> {
     sender: Sender<TParam>,
-    thread: JoinHandle<()>,
+    _thread: JoinHandle<()>,
 }
 
 impl<TParam: Send + 'static> Worker<TParam> {
     pub fn new<TFunc>(mut func: TFunc) -> Self
     where
-        TFunc: FnMut(TParam) -> () + Send + 'static,
+        TFunc: FnMut(TParam) + Send + 'static,
     {
         let (sender, receiver) = channel::<TParam>();
         let thread = spawn(move || {
@@ -17,15 +17,13 @@ impl<TParam: Send + 'static> Worker<TParam> {
                 func(item);
             }
         });
-        Self { sender, thread }
+        Self {
+            sender,
+            _thread: thread,
+        }
     }
 
     pub fn sender(&self) -> &Sender<TParam> {
         &self.sender
-    }
-
-    pub fn join(self) -> std::thread::Result<()> {
-        drop(self.sender);
-        self.thread.join()
     }
 }
