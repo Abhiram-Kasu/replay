@@ -2,7 +2,6 @@ use std::error::Error;
 use std::fmt::Display;
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::os::fd::{AsRawFd, RawFd};
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -151,10 +150,9 @@ pub struct MemoryMappedFileObserver {
 }
 
 struct MemoryMappedFileObserverState {
-    file_fd: RawFd,
     mmap_handle: Arc<RwLock<MmapMut>>,
+    file: File,
     offset: usize,
-    default_size: usize,
 }
 
 impl Observer for MemoryMappedFileObserver {
@@ -166,27 +164,30 @@ impl Observer for MemoryMappedFileObserver {
 
 impl FileObserver for MemoryMappedFileObserver {}
 impl MemoryMappedFileObserverState {
-    fn remap(&mut self) -> Result<(), Box<dyn Error>> {
-        self.mmap_handle
-            .read()
-            .expect("Failed to do Read Lock")
-            .flush()
-            .expect("Failed to flush changes in remap");
-        self.mmap_handle = Arc::new(RwLock::new(unsafe {
-            MmapOptions::new()
-                .offset(self.offset as u64)
-                .len(self.default_size)
-                .map_mut(self.file_fd)?
-        }));
+    fn ensure_capacity(&mut self, required_size: usize) -> Result<(), Box<dyn Error>> {
+        let mut mmap = self
+            .mmap_handle
+            .write()
+            .expect("Failed to lock mmap for growth");
+        if required_size <= mmap.len() {
+            return Ok(());
+        }
 
-        self.offset = 0;
-
+        mmap.flush()?;
+        let new_size = required_size.max(mmap.len().checked_mul(2).ok_or_else(|| {
+            std::io::Error::other("memory-mapped log grew beyond addressable capacity")
+        })?);
+        self.file.set_len(new_size as u64)?;
+        *mmap = unsafe { MmapOptions::new().len(new_size).map_mut(&self.file)? };
         Ok(())
     }
 }
 
 impl Drop for MemoryMappedFileObserver {
     fn drop(&mut self) {
+        self.worker
+            .shutdown()
+            .expect("Failed to stop memory-mapped observer worker");
         // truncate the file
         self.file
             .set_len(
@@ -205,17 +206,18 @@ impl Drop for MemoryMappedFileObserver {
 impl MemoryMappedFileObserver {
     // we will just overwrite anything in the file, maybe in the future have a pointer into the file from where we can start writing
     pub fn new(file: File, initial_size: usize) -> Result<Self, Box<dyn Error>> {
+        if initial_size == 0 {
+            return Err("memory-mapped file observer requires a non-zero initial size".into());
+        }
+        file.set_len(initial_size as u64)?;
         let mmap = Arc::new(RwLock::new(unsafe {
-            MmapOptions::default()
-                .len(initial_size)
-                .map_mut(file.as_raw_fd())
+            MmapOptions::default().len(initial_size).map_mut(&file)
         }?));
 
         let mut state = MemoryMappedFileObserverState {
-            file_fd: file.as_raw_fd(),
             mmap_handle: mmap.clone(),
+            file: file.try_clone()?,
             offset: 0,
-            default_size: initial_size,
         };
 
         let total_file_size = Arc::new(AtomicUsize::new(0));
@@ -225,26 +227,17 @@ impl MemoryMappedFileObserver {
             let st = &mut state;
             let output = format!("[MMapObserver] {event}\n");
             let len = output.len();
-            {
-                let mmap_read = st
-                    .mmap_handle
-                    .read()
-                    .expect("Failed to get read lock on mmap");
-
-                if len + st.offset >= mmap_read.len() {
-                    drop(mmap_read);
-                    if let Some(err) = st.remap().err() {
-                        eprintln!("Failed to remap: {err}");
-                    }
-                }
-            }
-            let bytes = output.bytes().collect::<Vec<_>>();
+            let required_size = st
+                .offset
+                .checked_add(len)
+                .expect("memory-mapped log size overflow");
+            st.ensure_capacity(required_size)
+                .expect("Failed to grow memory-mapped log");
 
             let mut mmap_write = st.mmap_handle.write().expect("Failed to get write handle");
-            mmap_write[st.offset..st.offset + bytes.len()].copy_from_slice(bytes.as_slice());
-            st.offset += bytes.len();
-            // Just update eventually
-            worker_copy.fetch_add(bytes.len(), std::sync::atomic::Ordering::Relaxed);
+            mmap_write[st.offset..required_size].copy_from_slice(output.as_bytes());
+            st.offset = required_size;
+            worker_copy.store(st.offset, std::sync::atomic::Ordering::Release);
         });
         Ok(Self {
             worker,
@@ -252,5 +245,51 @@ impl MemoryMappedFileObserver {
             mmap,
             total_file_size,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Side;
+    use std::fs::{self, OpenOptions};
+    use std::num::NonZero;
+
+    #[test]
+    fn memory_mapped_observer_grows_the_backing_file() {
+        let path = std::env::temp_dir().join(format!(
+            "replay-mmap-observer-{}-{}.log",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+
+        {
+            let mut observer = MemoryMappedFileObserver::new(file, 16).unwrap();
+            observer
+                .log(
+                    &Event::New(LimitOrder {
+                        id: 1,
+                        side: Side::Buy,
+                        price: NonZero::new(100).unwrap(),
+                        quantity: 1,
+                    })
+                    .into(),
+                )
+                .unwrap();
+        }
+
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("New(LimitOrder"));
+        assert!(fs::metadata(&path).unwrap().len() > 16);
+        fs::remove_file(path).unwrap();
     }
 }

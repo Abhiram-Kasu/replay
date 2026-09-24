@@ -1,9 +1,9 @@
 use std::sync::mpsc::{Sender, channel};
 use std::thread::{JoinHandle, spawn};
 
-pub(crate) struct Worker<TParam> {
-    sender: Sender<TParam>,
-    _thread: JoinHandle<()>,
+pub(crate) struct Worker<TParam: Send + 'static> {
+    sender: Option<Sender<TParam>>,
+    thread: Option<JoinHandle<()>>,
 }
 
 impl<TParam: Send + 'static> Worker<TParam> {
@@ -18,12 +18,29 @@ impl<TParam: Send + 'static> Worker<TParam> {
             }
         });
         Self {
-            sender,
-            _thread: thread,
+            sender: Some(sender),
+            thread: Some(thread),
         }
     }
 
     pub fn sender(&self) -> &Sender<TParam> {
-        &self.sender
+        self.sender
+            .as_ref()
+            .expect("worker sender requested after shutdown")
+    }
+
+    pub fn shutdown(&mut self) -> std::thread::Result<()> {
+        self.sender.take();
+        if let Some(thread) = self.thread.take() {
+            thread.join()
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl<TParam: Send + 'static> Drop for Worker<TParam> {
+    fn drop(&mut self) {
+        let _ = self.shutdown();
     }
 }
